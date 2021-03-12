@@ -33,9 +33,13 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/xmidt-org/candlelight"
 	"github.com/xmidt-org/tr1d1um/common"
 	"github.com/xmidt-org/tr1d1um/stat"
 	"github.com/xmidt-org/tr1d1um/translation"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -178,6 +182,14 @@ func tr1d1um(arguments []string) (exitCode int) {
 	} else {
 		infoLogger.Log(logging.MessageKey(), "Webhook service disabled")
 	}
+	// actually fetch from config
+	cfg := candlelight.Config{}
+	traceProvider, err := candlelight.ConfigureTracerProvider(cfg)
+	tc := transportTraceConfig{
+		traceProvider: traceProvider,
+		propagator:    propagation.TraceContext{},
+	}
+	instrumentedClient := newInstrumentedClient(tc, *tConfigs)
 
 	//
 	// Stat Service configs
@@ -191,7 +203,7 @@ func tr1d1um(arguments []string) (exitCode int) {
 						Retries:  v.GetInt(reqMaxRetriesKey),
 						Interval: v.GetDuration(reqRetryIntervalKey),
 					},
-					newClient(v, tConfigs).Do),
+					instrumentedClient.Do),
 				RequestTimeout: tConfigs.rTimeout,
 			}),
 		XmidtStatURL: fmt.Sprintf("%s/%s/device/${device}/stat", v.GetString(targetURLKey), apiBase),
@@ -330,6 +342,32 @@ func newTimeoutConfigs(v *viper.Viper) (t *timeoutConfigs, err error) {
 		}
 	}
 	return
+}
+
+// I'm pretty sure we might only need to initialize these two fields once per service
+// and then just pass around the dependencies.
+type transportTraceConfig struct {
+	traceProvider trace.TracerProvider
+	propagator    propagation.TextMapPropagator
+}
+
+func newInstrumentedClient(config transportTraceConfig, t timeoutConfigs) *http.Client {
+	transport := &http.Transport{
+		Dial: (&net.Dialer{
+			Timeout: t.dTimeout,
+		}).Dial,
+	}
+	options := []otelhttp.Option{
+		otelhttp.WithPropagators(config.propagator),
+		otelhttp.WithTracerProvider(config.traceProvider),
+	}
+
+	instrumentedTransport := otelhttp.NewTransport(transport, options...)
+
+	return &http.Client{
+		Timeout:   t.cTimeout,
+		Transport: instrumentedTransport,
+	}
 }
 
 func newClient(v *viper.Viper, t *timeoutConfigs) *http.Client {
