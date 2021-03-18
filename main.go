@@ -57,6 +57,9 @@ import (
 	"github.com/xmidt-org/webpa-common/server"
 	"github.com/xmidt-org/webpa-common/xhttp"
 	"github.com/xmidt-org/webpa-common/xmetrics"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // convenient global values
@@ -100,6 +103,27 @@ var defaults = map[string]interface{}{
 	hooksSchemeKey:         "https",
 }
 
+type firstNodeTraceEchoer struct {
+	propagator propagation.TextMapPropagator
+}
+
+// EchoFirstNodeInTrace should be run after the middleware that starts the main span of this application.
+// Assuming this is the first node of the entire trace, the trace information is echoed through the
+// HTTP response.
+// This would probably need to be in xmidt-org/candlelight
+func (f firstNodeTraceEchoer) EchoStartNodeTrace(delegate http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := f.propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		rsc := trace.RemoteSpanContextFromContext(ctx)
+		if !rsc.IsValid() {
+			sc := trace.SpanContextFromContext(ctx)
+			w.Header().Set("X-Midt-Span-ID", sc.SpanID.String())
+			w.Header().Set("X-Midt-Trace-ID", sc.TraceID.String())
+		}
+		delegate.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func tr1d1um(arguments []string) (exitCode int) {
 
 	var (
@@ -130,10 +154,6 @@ func tr1d1um(arguments []string) (exitCode int) {
 
 	infoLogger.Log("configurationFile", v.ConfigFileUsed())
 
-	r := mux.NewRouter()
-
-	APIRouter := r.PathPrefix(fmt.Sprintf("/%s/", apiBase)).Subrouter()
-
 	u := v.Sub(tracingConfigKey)
 	if u == nil {
 		fmt.Fprintf(os.Stderr, "tracing configuration is missing.\n")
@@ -148,13 +168,23 @@ func tr1d1um(arguments []string) (exitCode int) {
 		fmt.Fprintf(os.Stderr, "Unable to build traceProvider: %s\n", err.Error())
 		return 1
 	}
-	traceConfig := candlelight.TraceConfig{TraceProvider: traceProvider}
-	authenticate, err = authenticationHandler(v, logger, metricsRegistry, traceConfig)
+	propagator := propagation.TraceContext{}
+	traceMiddleware := firstNodeTraceEchoer{propagator: propagator}
+	authenticate, err = authenticationHandler(v, logger, metricsRegistry)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to build authentication handler: %s\n", err.Error())
 		return 1
 	}
+
+	rootRouter := mux.NewRouter()
+	otelMuxOptions := []otelmux.Option{
+		otelmux.WithPropagators(propagator),
+		otelmux.WithTracerProvider(traceProvider),
+	}
+	rootRouter.Use(otelmux.Middleware("mainSpan", otelMuxOptions...), traceMiddleware.EchoFirstNodeInTrace)
+
+	APIRouter := rootRouter.PathPrefix(fmt.Sprintf("/%s/", apiBase)).Subrouter()
 
 	tConfigs, err := newTimeoutConfigs(v)
 
@@ -399,7 +429,7 @@ type CapabilityConfig struct {
 }
 
 // authenticationHandler configures the authorization requirements for requests to reach the main handler
-func authenticationHandler(v *viper.Viper, logger log.Logger, registry xmetrics.Registry, traceConfig candlelight.TraceConfig) (*alice.Chain, error) {
+func authenticationHandler(v *viper.Viper, logger log.Logger, registry xmetrics.Registry) (*alice.Chain, error) {
 	if registry == nil {
 		return nil, errors.New("nil registry")
 	}
@@ -491,7 +521,7 @@ func authenticationHandler(v *viper.Viper, logger log.Logger, registry xmetrics.
 		basculehttp.WithEErrorResponseFunc(listener.OnErrorResponse),
 	)
 
-	constructors := []alice.Constructor{traceConfig.TraceMiddleware, SetLogger(logger), authConstructor, authEnforcer, basculehttp.NewListenerDecorator(listener)}
+	constructors := []alice.Constructor{SetLogger(logger), authConstructor, authEnforcer, basculehttp.NewListenerDecorator(listener)}
 
 	chain := alice.New(constructors...)
 	return &chain, nil
