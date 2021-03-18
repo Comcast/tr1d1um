@@ -107,7 +107,7 @@ type firstNodeTraceEchoer struct {
 	propagator propagation.TextMapPropagator
 }
 
-// EchoFirstNodeInTrace should be run after the middleware that starts the main span of this application.
+// EchoStartNodeTrace should be run after the middleware that starts the main span of this application.
 // Assuming this is the first node of the entire trace, the trace information is echoed through the
 // HTTP response.
 // This would probably need to be in xmidt-org/candlelight
@@ -182,7 +182,7 @@ func tr1d1um(arguments []string) (exitCode int) {
 		otelmux.WithPropagators(propagator),
 		otelmux.WithTracerProvider(traceProvider),
 	}
-	rootRouter.Use(otelmux.Middleware("mainSpan", otelMuxOptions...), traceMiddleware.EchoFirstNodeInTrace)
+	rootRouter.Use(otelmux.Middleware("mainSpan", otelMuxOptions...), traceMiddleware.EchoStartNodeTrace)
 
 	APIRouter := rootRouter.PathPrefix(fmt.Sprintf("/%s/", apiBase)).Subrouter()
 
