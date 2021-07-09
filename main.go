@@ -174,7 +174,7 @@ func tr1d1um(arguments []string) (exitCode int) {
 		}
 		webhookConfig.Argus.HTTPClient = newHTTPClient(argusClientTimeout, tracing)
 
-		svc, stopWatch, err := ancla.Initialize(webhookConfig, getLogger)
+		svc, stopWatch, err := ancla.Initialize(webhookConfig, getLogger, logging.WithLogger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to initialize webhook service: %s\n", err.Error())
 			return 1
@@ -467,7 +467,7 @@ func authenticationHandler(v *viper.Viper, logger log.Logger, registry xmetrics.
 		}
 
 		options = append(options, basculehttp.WithTokenFactory("Bearer", basculehttp.BearerTokenFactory{
-			DefaultKeyId: DefaultKeyID,
+			DefaultKeyID: DefaultKeyID,
 			Resolver:     resolver,
 			Parser:       bascule.DefaultJWTParser,
 			Leeway:       jwtVal.Leeway,
